@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# sptest 安装脚本（优化版）
+# sptest 安装脚本（优化版 v2）
 # ------------------------------------------------------------
 # 功能：
 #   1. 交互式配置 Telegram Bot Token 和 Chat ID
@@ -53,7 +53,6 @@ print_divider() {
 }
 
 # ---------- 安全读取（兼容 set -e） ----------
-# read 在 EOF 时返回非 0，会触发 set -e 退出，这里统一兜底
 safe_read() {
     local __var=$1
     local __prompt=$2
@@ -103,7 +102,6 @@ interactive_config() {
         warn "Chat ID 不能为空，请重新输入"
     done
 
-    # 用单引号包裹值，避免特殊字符被 shell 解释；同时转义内部单引号
     cat > "$CONF_FILE" <<EOF
 # sptest 配置文件
 # 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
@@ -187,36 +185,7 @@ install_pkg() {
     esac
 }
 
-# ---------- 安装 Ookla 官方 speedtest ----------
-# 各平台官方安装方式不同，这里只处理主流 Linux
-install_ookla() {
-    echo -e "${YELLOW}正在安装 Ookla 官方 speedtest ...${NC}"
-    case $PKG_MGR in
-        apt)
-            # Debian/Ubuntu：官方 packagecloud 源
-            if ! curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash; then
-                echo "❌ 添加 Ookla 源失败，请检查网络后手动安装："
-                echo "   curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash"
-                echo "   apt install -y speedtest"
-                return 1
-            fi
-            apt-get install -y speedtest
-            ;;
-        dnf|yum)
-            curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.rpm.sh | bash && \
-            $PKG_MGR install -y speedtest
-            ;;
-        apk)
-            # Alpine 官方源里通常没有，需手动下载二进制
-            install_ookla_binary
-            ;;
-        *)
-            install_ookla_binary
-            ;;
-    esac
-}
-
-# ---------- 通用二进制安装（兜底） ----------
+# ---------- 通用二进制安装（推荐，跨发行版一致） ----------
 install_ookla_binary() {
     local arch url tmp
     arch=$(uname -m)
@@ -235,30 +204,83 @@ install_ookla_binary() {
     rm -rf "$tmp"
 }
 
+# ---------- 安装 Ookla 官方 speedtest ----------
+install_ookla() {
+    echo -e "${YELLOW}正在安装 Ookla 官方 speedtest ...${NC}"
+    case $PKG_MGR in
+        apt)
+            if ! curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash; then
+                echo "⚠️  添加 Ookla 源失败，改用二进制安装"
+                install_ookla_binary && return 0
+                return 1
+            fi
+            apt-get install -y speedtest || { install_ookla_binary; }
+            ;;
+        dnf|yum)
+            if ! curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.rpm.sh | bash; then
+                install_ookla_binary && return 0
+                return 1
+            fi
+            $PKG_MGR install -y speedtest || { install_ookla_binary; }
+            ;;
+        *)
+            install_ookla_binary
+            ;;
+    esac
+}
+
+# ---------- 判断是否为 Ookla 官方版 ----------
+is_ookla_speedtest() {
+    local bin=$1
+    [ -x "$bin" ] || return 1
+    "$bin" --version 2>&1 | grep -qi "Ookla"
+}
+
 # ---------- 依赖检查 ----------
+SPEEDTEST_BIN=""
+
 check_deps() {
     local need_apt=()
 
     command -v curl &>/dev/null || need_apt+=("curl")
     command -v jq   &>/dev/null || need_apt+=("jq")
 
-    # 只认 Ookla 官方版；Python 版 speedtest-cli 已失效，不再使用
-    if ! command -v speedtest &>/dev/null; then
-        if [ ${#need_apt[@]} -gt 0 ]; then
-            echo "检测到缺少依赖: ${need_apt[*]}"
-            for pkg in "${need_apt[@]}"; do
-                install_pkg "$pkg" || exit 1
-            done
-        fi
-        install_ookla || exit 1
-        return 0
-    fi
-
     if [ ${#need_apt[@]} -gt 0 ]; then
         echo "检测到缺少依赖: ${need_apt[*]}"
         for pkg in "${need_apt[@]}"; do
             install_pkg "$pkg" || exit 1
         done
+    fi
+
+    # 优先使用 /usr/local/bin/speedtest（我们自己装的）
+    if is_ookla_speedtest /usr/local/bin/speedtest; then
+        SPEEDTEST_BIN="/usr/local/bin/speedtest"
+        return 0
+    fi
+
+    # 再看 PATH 里的 speedtest 是不是 Ookla 官方版
+    local existing
+    existing=$(command -v speedtest 2>/dev/null || true)
+    if [ -n "$existing" ] && is_ookla_speedtest "$existing"; then
+        SPEEDTEST_BIN="$existing"
+        return 0
+    fi
+
+    # 存在非 Ookla 版（Python speedtest-cli 等），提示后重装
+    if [ -n "$existing" ]; then
+        echo -e "${YELLOW}⚠️  检测到非 Ookla 版 speedtest: $existing${NC}"
+        echo -e "${YELLOW}   将安装官方版并覆盖使用${NC}"
+    fi
+
+    install_ookla || exit 1
+
+    if is_ookla_speedtest /usr/local/bin/speedtest; then
+        SPEEDTEST_BIN="/usr/local/bin/speedtest"
+    elif [ -n "$existing" ] && is_ookla_speedtest "$existing"; then
+        SPEEDTEST_BIN="$existing"
+    else
+        echo "❌ 未能找到可用的 Ookla speedtest 二进制"
+        exit 1
     fi
 }
 
@@ -301,25 +323,38 @@ echo -e "${CYAN}${BOLD}║          🚀  开始测速，请稍候...           
 echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════╝${NC}"
 echo ""
 
-# ---------- 测速（分步诊断） ----------
+# ---------- 测速（分步诊断 + IPv4 回退） ----------
 TMP_JSON=$(mktemp)
-trap 'rm -f "$TMP_JSON"' EXIT
+TMP_ERR=$(mktemp)
+trap 'rm -f "$TMP_JSON" "$TMP_ERR"' EXIT
 
-if ! speedtest --format=json --accept-license --accept-gdpr >"$TMP_JSON" 2>/tmp/sptest_err.$$; then
-    echo -e "${RED}❌ speedtest 执行失败${NC}"
-    if [ -s /tmp/sptest_err.$$ ]; then
-        echo "错误信息："
-        sed 's/^/  /' /tmp/sptest_err.$$
+run_speedtest() {
+    local extra_flags=("$@")
+    "$SPEEDTEST_BIN" --format=json --accept-license --accept-gdpr \
+        "${extra_flags[@]}" >"$TMP_JSON" 2>"$TMP_ERR"
+}
+
+# 第一次：默认（IPv4/IPv6 自动）
+if ! run_speedtest; then
+    echo -e "${YELLOW}⚠️  默认模式失败，尝试强制 IPv4 ...${NC}"
+    if ! run_speedtest -4; then
+        echo -e "${RED}❌ speedtest 执行失败${NC}"
+        echo ""
+        echo "---- stderr ----"
+        [ -s "$TMP_ERR" ] && sed 's/^/  /' "$TMP_ERR" || echo "  (空)"
+        echo "---- stdout ----"
+        [ -s "$TMP_JSON" ] && head -c 1000 "$TMP_JSON" | sed 's/^/  /' || echo "  (空)"
+        echo ""
+        echo "常见原因："
+        echo "  • 服务器无法访问 speedtest.net（网络/防火墙问题）"
+        echo "  • DNS 解析失败，尝试在 /etc/resolv.conf 添加 nameserver 9.9.9.9"
+        echo "  • 二进制与系统架构不匹配（musl 系统需静态二进制）"
+        echo "  • 时间偏差过大导致 TLS 校验失败，请检查系统时间"
+        echo ""
+        echo "提示：手动运行 $SPEEDTEST_BIN --version 检查版本是否为 Ookla 官方版"
+        exit 1
     fi
-    rm -f /tmp/sptest_err.$$
-    echo ""
-    echo "常见原因："
-    echo "  • 服务器无法访问 speedtest.net（网络/防火墙问题）"
-    echo "  • 首次运行未接受许可（本脚本已自动接受）"
-    echo "  • 二进制与系统架构不匹配"
-    exit 1
 fi
-rm -f /tmp/sptest_err.$$
 
 JSON=$(cat "$TMP_JSON")
 
@@ -386,7 +421,6 @@ else
     echo ""
     echo -e "${RED}❌ 发送失败${NC}"
     echo "响应: $RESPONSE"
-    # 若 sendPhoto 失败，回退用 sendMessage（图片可能是异步生成，偶发 404）
     echo -e "${YELLOW}尝试改用 sendMessage 发送文本...${NC}"
     RESPONSE2=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
         -F "chat_id=${TG_CHAT_ID}" \
