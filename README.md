@@ -22,8 +22,22 @@
 
 ### 一键安装
 
+### 1. 下载脚本
+
 ```bash
-bash -c "$(curl -L https://raw.githubusercontent.com/SumMoonYou/speedtest/refs/heads/main/install.sh)" @ install
+wget -O install.sh https://raw.githubusercontent.com/SunMoonWithYou/speedtest/main/install.sh
+```
+
+### 2. 赋予执行权限
+
+```bash
+chmod +x install.sh
+```
+
+### 3. 运行
+
+```bash
+sudo ./install.sh
 ```
 
 首次运行会提示你输入：
